@@ -1,69 +1,136 @@
-import Image from "next/image";
+"use client";
+
+import { useState } from "react";
+import { FileDropzone } from "@/components/FileDropzone";
+import { ResultPanel } from "@/components/ResultPanel";
+import type { ExtractResponse, ExtractSuccess } from "@/lib/api-types";
+import { ACCEPT_ATTRIBUTE, MAX_FILE_BYTES } from "@/lib/upload-constraints";
+import { EXTRACTION_TYPES, type ExtractionType } from "@/lib/extraction/types";
+
+const TYPE_LABELS: Record<ExtractionType, string> = {
+  ranking: "Ranking",
+  record: "Record",
+  athletes: "Athletes",
+  teams: "Teams",
+  events: "Events",
+};
+
+type Status = "idle" | "working" | "done" | "failed";
 
 export default function Home() {
+  const [file, setFile] = useState<File | null>(null);
+  const [type, setType] = useState<ExtractionType>("athletes");
+  const [status, setStatus] = useState<Status>("idle");
+  const [result, setResult] = useState<ExtractSuccess | null>(null);
+  const [error, setError] = useState<{ message: string; code: string } | null>(null);
+
+  const working = status === "working";
+
+  async function extract() {
+    if (!file) return;
+
+    setStatus("working");
+    setResult(null);
+    setError(null);
+
+    const body = new FormData();
+    body.append("file", file);
+    body.append("extractionType", type);
+
+    try {
+      const response = await fetch("/api/extract", { method: "POST", body });
+      const payload = (await response.json()) as ExtractResponse;
+
+      if (payload.success) {
+        setResult(payload);
+        setStatus("done");
+      } else {
+        setError({ message: payload.error, code: payload.errorCode });
+        setStatus("failed");
+      }
+    } catch {
+      setError({
+        message: "Could not reach the extraction service. Check your connection and try again.",
+        code: "NETWORK_ERROR",
+      });
+      setStatus("failed");
+    }
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <main className="mx-auto w-full max-w-4xl px-6 py-12 sm:py-16">
+      <header className="mb-10">
+        <h1 className="text-3xl font-semibold tracking-tight">Sports Data Extractor</h1>
+        <p className="mt-2 max-w-xl text-navy-600 dark:text-navy-300">
+          Upload a results sheet, record book, start list, or ranking table. Choose what to pull out
+          of it, and get structured JSON back.
+        </p>
+      </header>
+
+      <div className="flex flex-col gap-6 rounded-lg border border-navy-200 bg-navy-50 p-6 dark:border-navy-800 dark:bg-navy-900">
+        <div className="flex flex-col gap-2">
+          <label className="text-sm font-medium">Upload file</label>
+          <FileDropzone
+            file={file}
+            onSelect={setFile}
+            accept={ACCEPT_ATTRIBUTE}
+            maxBytes={MAX_FILE_BYTES}
+            disabled={working}
+          />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <label htmlFor="extraction-type" className="text-sm font-medium">
+            Extract from this file
+          </label>
+          <select
+            id="extraction-type"
+            value={type}
+            disabled={working}
+            onChange={(event) => setType(event.target.value as ExtractionType)}
+            className="w-full rounded-md border border-navy-300 bg-navy-50 px-3 py-2 text-navy-950 disabled:opacity-60 dark:border-navy-700 dark:bg-navy-950 dark:text-navy-50"
+          >
+            {EXTRACTION_TYPES.map((option) => (
+              <option key={option} value={option}>
+                {TYPE_LABELS[option]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <button
+          onClick={extract}
+          disabled={!file || working}
+          className="rounded-md bg-navy-900 px-4 py-2.5 font-medium text-navy-50 transition-colors hover:bg-navy-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-navy-100 dark:text-navy-950 dark:hover:bg-navy-50"
+        >
+          {working ? "Extracting…" : "Extract Data"}
+        </button>
+
+        {working && (
+          <p className="text-center text-sm text-navy-500 dark:text-navy-400" role="status">
+            Reading the file and extracting {TYPE_LABELS[type].toLowerCase()} — this usually takes
+            5-30 seconds.
+          </p>
+        )}
+      </div>
+
+      {status === "failed" && error && (
+        <div
+          role="alert"
+          className="mt-6 rounded-lg border border-red-200 bg-red-50 px-5 py-4 dark:border-red-900/50 dark:bg-red-950/30"
+        >
+          <p className="font-medium text-red-900 dark:text-red-200">{error.message}</p>
+          <p className="mt-1 font-mono text-xs text-red-700/70 dark:text-red-300/60">
+            {error.code}
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+      )}
+
+      {status === "done" && result && (
+        <div className="mt-6">
+          <ResultPanel result={result} />
         </div>
-      </main>
-    </div>
+      )}
+    </main>
   );
 }
