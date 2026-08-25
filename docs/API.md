@@ -52,6 +52,7 @@ is rejected, not parsed.
     "repairAttempts": 0,
     "model": "gpt-4.1-mini",
     "durationMs": 4820,
+    "timings": { "parseMs": 1, "modelMs": 4748 },
     "warnings": []
   }
 }
@@ -71,10 +72,45 @@ Additive and safe to ignore. `success`, `type` and `data` are the contract.
 | `requestId` | Correlates with the server logs. Quote it in bug reports. |
 | `recordCount` | `data.length`. |
 | `sourcePath` | `text-layer` (text extracted locally) or `vision` (the model read the file). |
-| `chunks` | Model calls made. More than 1 means the file was split. |
+| `chunks` | Model calls made. More than 1 means the file was split — into parts and, for spreadsheets, one per sheet. |
 | `duplicatesRemoved` | Records collapsed during the merge. |
 | `repairAttempts` | Times a response failed validation and was re-requested. Non-zero is worth investigating. |
+| `timings` | `parseMs` (local file handling) and `modelMs` (all model calls). Parsing is single-digit milliseconds; the model is the request. |
 | `warnings` | Human-readable notes: skipped sheets, vision fallback, truncation, empty results. |
+
+---
+
+## Streaming — `POST /api/extract?stream=1`
+
+Same request, same final payload, delivered as the last line of a newline-delimited
+JSON stream instead of the only one. Model calls take seconds, and a caller that can
+show what is happening during them should not have to wait for the whole body.
+
+```bash
+curl -N -F "file=@samples/athletes-squad.xlsx" \
+        -F "extractionType=athletes" \
+        "http://localhost:3000/api/extract?stream=1"
+```
+
+```jsonc
+{"event":"progress","stage":"parsing","message":"Reading the file"}
+{"event":"progress","stage":"extracting","message":"Extracting athletes data from 3 parts","completedChunks":0,"totalChunks":3}
+{"event":"progress","stage":"extracting","message":"Extracting athletes data — 1 of 3 parts done","completedChunks":1,"totalChunks":3}
+{"event":"progress","stage":"merging","message":"Merging results"}
+{"event":"result","status":200,"success":true,"type":"athletes","data":[...],"meta":{...}}
+```
+
+- **The stream always returns HTTP 200**, including for failures — the status is
+  already sent before the pipeline can fail. The `result` line carries a `status`
+  field with the code the buffered form would have returned, and `success: false`
+  with the usual `error` / `errorCode`.
+- **`progress` lines are advisory.** Their wording is not a contract; ignore any
+  `event` you do not recognise. Only the `result` line matters.
+- Parts run concurrently, so `completedChunks` counts finished parts rather than
+  identifying which one is in flight.
+
+Without `?stream=1` the endpoint behaves exactly as documented above — one buffered
+JSON body, real HTTP status codes. That remains the default and the contract.
 
 ---
 

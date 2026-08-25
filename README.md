@@ -24,6 +24,9 @@ Open http://localhost:3000.
 | `OPENAI_API_KEY` | yes | — | https://platform.openai.com/api-keys |
 | `OPENAI_MODEL` | no | `gpt-4.1-mini` | Must support Structured Outputs **and** vision |
 | `ENABLE_VISION_FALLBACK` | no | `true` | `false` keeps uploaded files inside your infrastructure |
+| `CHUNK_CONCURRENCY` | no | `4` | Model calls in flight at once. Lower it if you hit provider rate limits |
+| `CHUNK_LINE_LIMIT` | no | `80` | Source lines per call. Raise for prose, lower if long tables come back short |
+| `CHUNK_CHAR_LIMIT` | no | `40000` | Source characters per call. Rarely the binding limit |
 
 With `ENABLE_VISION_FALLBACK=false`, no file is ever sent to OpenAI as a file — only text
 extracted locally. Scanned PDFs and image uploads then fail with `NO_TEXT_CONTENT`
@@ -103,7 +106,45 @@ hallucinate.
 **Large files are chunked, not truncated.** Text splits on row and page boundaries, never
 mid-record, with section headers replayed into continuation chunks. Results merge on a
 per-type natural key, filling gaps between partial sightings without overwriting known
-values.
+values. Chunks are sized by *lines*, not bytes, and run concurrently — see below.
+
+## Speed
+
+The model is the request. Everything else — validating, parsing, chunking, merging — is
+single-digit milliseconds, and `meta.timings` reports the split so this stays a
+measurement rather than an assumption.
+
+```
+{ "parseMs": 1, "modelMs": 4748 }
+```
+
+Three things follow from that, and they are the difference between the current numbers
+and the ones this started with:
+
+**Chunks are sized by lines, not characters.** The binding constraint is the size of the
+*answer*, not the size of the input. A response has a token ceiling, and a model handed
+900 table rows does not fail — it writes as much as it can and stops, returning a short
+list indistinguishable from a complete one. Measured on a 300-row ranking CSV:
+
+| Chunking | Records returned | Time |
+| --- | --- | --- |
+| One 40,000-character chunk | **100 of 300** | 145s |
+| Four 80-line chunks | **300 of 300** | 42s |
+
+**Chunks run concurrently.** Four at a time by default, so a file split five ways costs
+roughly the slowest part rather than the sum of all of them. This is what makes smaller
+chunks affordable: more calls, less waiting.
+
+**Each spreadsheet sheet gets its own call.** A request holding three sheets is one the
+model can half-answer — `samples/athletes-squad.xlsx` silently dropped its short
+trailing "Reserves" sheet in one run out of three. Separate calls removed it: 6 of 6 on
+five consecutive runs, and *faster* than the single call was, because the parts overlap.
+Pages are not treated this way — a page break falls inside a document that reads
+continuously, and splitting there would buy nothing.
+
+The frontend uses the streaming form of the endpoint (`?stream=1`) so the wait is
+narrated rather than silent. That makes nothing faster; it makes the difference between
+waiting and wondering. See [docs/API.md](docs/API.md#streaming--postapiextractstream1).
 
 ### Not inventing data
 
@@ -138,17 +179,21 @@ lib/
   files/
     validate.ts               size, extension, magic bytes
     detect.ts                 format → parser
-    chunk.ts                  boundary-aware splitting
+    chunk.ts                  boundary-aware splitting, sized by lines
     parsers/                  pdf, spreadsheet, docx, text, image
-tests/                        schemas, merge, chunking
+  concurrency.ts              bounded parallelism for the chunk calls
+  progress.ts                 the progress event shape, shared with the client
+  ndjson.ts                   reads the streaming response line by line
+tests/                        schemas, merge, chunking, concurrency, ndjson
 samples/                      fixtures, including the awkward ones
 docs/API.md                   endpoint reference
 ```
 
 ## Limits
 
-- **15 MB** per file, **12 chunks** per request. Larger files are read up to the ceiling
-  and flagged in `meta.warnings` — split them and extract each part.
+- **15 MB** per file, **24 chunks** per request — roughly 1,900 rows of tabular data.
+  Larger files are read up to the ceiling and flagged in `meta.warnings`; split them and
+  extract each part.
 - **Synchronous.** One request, one response. Files needing more than ~120s of processing
   need a job queue instead; the pipeline is structured so one can go in front of it
   without a rewrite.

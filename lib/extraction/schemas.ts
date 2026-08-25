@@ -44,14 +44,6 @@ const eventItem = z.strictObject({
   participants: z.array(z.string()),
 });
 
-export const ITEM_SCHEMAS = {
-  ranking: rankingItem,
-  record: recordItem,
-  athletes: athleteItem,
-  teams: teamItem,
-  events: eventItem,
-} as const satisfies Record<ExtractionType, z.ZodObject>;
-
 /**
  * Structured Outputs requires the root of the schema to be an object, so the array
  * is wrapped. `data` is the only key, which keeps the model's job unambiguous.

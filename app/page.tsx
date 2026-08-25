@@ -1,9 +1,12 @@
 "use client";
 
 import { useState } from "react";
+import { ExtractionProgress } from "@/components/ExtractionProgress";
 import { FileDropzone } from "@/components/FileDropzone";
 import { ResultPanel } from "@/components/ResultPanel";
 import type { ExtractResponse, ExtractSuccess } from "@/lib/api-types";
+import { readNdjson } from "@/lib/ndjson";
+import type { ProgressUpdate } from "@/lib/progress";
 import { ACCEPT_ATTRIBUTE, MAX_FILE_BYTES } from "@/lib/upload-constraints";
 import { EXTRACTION_TYPES, type ExtractionType } from "@/lib/extraction/types";
 
@@ -17,14 +20,30 @@ const TYPE_LABELS: Record<ExtractionType, string> = {
 
 type Status = "idle" | "working" | "done" | "failed";
 
+/** One line of the NDJSON stream. `status` mirrors the HTTP status the buffered form would carry. */
+type StreamLine =
+  | ({ event: "progress" } & ProgressUpdate)
+  | ({ event: "result"; status: number } & ExtractResponse);
+
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [type, setType] = useState<ExtractionType>("athletes");
   const [status, setStatus] = useState<Status>("idle");
   const [result, setResult] = useState<ExtractSuccess | null>(null);
   const [error, setError] = useState<{ message: string; code: string } | null>(null);
+  const [progress, setProgress] = useState<ProgressUpdate | null>(null);
 
   const working = status === "working";
+
+  function settle(payload: ExtractResponse) {
+    if (payload.success) {
+      setResult(payload);
+      setStatus("done");
+    } else {
+      setError({ message: payload.error, code: payload.errorCode });
+      setStatus("failed");
+    }
+  }
 
   async function extract() {
     if (!file) return;
@@ -32,21 +51,44 @@ export default function Home() {
     setStatus("working");
     setResult(null);
     setError(null);
+    setProgress(null);
 
     const body = new FormData();
     body.append("file", file);
     body.append("extractionType", type);
 
     try {
-      const response = await fetch("/api/extract", { method: "POST", body });
-      const payload = (await response.json()) as ExtractResponse;
+      // The streaming variant of the same endpoint. Identical final payload, delivered
+      // as the last line rather than the only one, so the wait can be narrated.
+      const response = await fetch("/api/extract?stream=1", { method: "POST", body });
 
-      if (payload.success) {
-        setResult(payload);
-        setStatus("done");
-      } else {
-        setError({ message: payload.error, code: payload.errorCode });
-        setStatus("failed");
+      if (!response.body?.getReader) {
+        settle((await response.json()) as ExtractResponse);
+        return;
+      }
+
+      let settled = false;
+
+      for await (const line of readNdjson(response.body)) {
+        const message = line as StreamLine;
+
+        if (message.event === "progress") {
+          setProgress({
+            stage: message.stage,
+            message: message.message,
+            completedChunks: message.completedChunks,
+            totalChunks: message.totalChunks,
+          });
+        } else if (message.event === "result") {
+          settle(message);
+          settled = true;
+        }
+      }
+
+      // A stream that ends without a result line means the connection died mid-request.
+      // Without this the button stays disabled and the page waits forever.
+      if (!settled) {
+        throw new Error("stream ended before a result was sent");
       }
     } catch {
       setError({
@@ -106,12 +148,7 @@ export default function Home() {
           {working ? "Extracting…" : "Extract Data"}
         </button>
 
-        {working && (
-          <p className="text-center text-sm text-navy-500 dark:text-navy-400" role="status">
-            Reading the file and extracting {TYPE_LABELS[type].toLowerCase()} — this usually takes
-            5-30 seconds.
-          </p>
-        )}
+        {working && <ExtractionProgress update={progress} />}
       </div>
 
       {status === "failed" && error && (

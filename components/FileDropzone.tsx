@@ -57,7 +57,15 @@ export function FileDropzone({ file, onSelect, accept, maxBytes, disabled }: Pro
 
   return (
     <div>
-      <div
+      {/*
+        A real <button>, not a div with role="button": it gets keyboard activation,
+        focus handling and the disabled semantics for free, and those are exactly the
+        things a hand-rolled version gets subtly wrong.
+      */}
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => inputRef.current?.click()}
         onDragOver={(event) => {
           event.preventDefault();
           if (!disabled) setDragging(true);
@@ -69,7 +77,8 @@ export function FileDropzone({ file, onSelect, accept, maxBytes, disabled }: Pro
           if (!disabled) handle(event.dataTransfer.files[0]);
         }}
         className={[
-          "rounded-lg border-2 border-dashed px-6 py-10 text-center transition-colors",
+          "w-full rounded-lg border-2 border-dashed px-6 py-10 text-center transition-colors",
+          "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy-600",
           disabled ? "opacity-60" : "cursor-pointer",
           dragging
             ? "border-navy-500 bg-navy-100 dark:bg-navy-800/60"
@@ -77,17 +86,9 @@ export function FileDropzone({ file, onSelect, accept, maxBytes, disabled }: Pro
               ? "border-navy-600 bg-navy-100/80 dark:border-navy-400/70 dark:bg-navy-800/40"
               : "border-navy-300 hover:border-navy-400 dark:border-navy-700 dark:hover:border-navy-500",
         ].join(" ")}
-        onClick={() => !disabled && inputRef.current?.click()}
-        onKeyDown={(event) => {
-          if (disabled) return;
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            inputRef.current?.click();
-          }
-        }}
-        role="button"
-        tabIndex={disabled ? -1 : 0}
-        aria-label="Choose a file to extract from"
+        aria-label={
+          file ? `${file.name} selected. Choose a different file.` : "Choose a file to extract from"
+        }
       >
         {file ? (
           <div className="flex flex-col gap-1">
@@ -108,7 +109,7 @@ export function FileDropzone({ file, onSelect, accept, maxBytes, disabled }: Pro
             </span>
           </div>
         )}
-      </div>
+      </button>
 
       <input
         ref={inputRef}

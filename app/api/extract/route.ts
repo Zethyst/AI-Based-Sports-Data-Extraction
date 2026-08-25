@@ -1,17 +1,73 @@
 import { getModel } from "@/lib/config";
-import { toExtractionError } from "@/lib/errors";
+import type { ExtractResponse } from "@/lib/api-types";
+import { ExtractionError, toExtractionError } from "@/lib/errors";
 import { runExtraction } from "@/lib/extraction/pipeline";
-import { isExtractionType, EXTRACTION_TYPES } from "@/lib/extraction/types";
-import { createLogger, newRequestId } from "@/lib/logger";
+import { EXTRACTION_TYPES, isExtractionType } from "@/lib/extraction/types";
+import { type Logger, createLogger, newRequestId } from "@/lib/logger";
+import type { ProgressUpdate } from "@/lib/progress";
 import { checkRateLimit, clientKey } from "@/lib/rate-limit";
-import { ExtractionError } from "@/lib/errors";
 
 export const maxDuration = 120; // 2 minutes
 
+/**
+ * HTTP only: form in, response out. Everything that decides anything lives in the
+ * pipeline.
+ *
+ * Two response modes over one implementation. Without `?stream=1` the caller gets the
+ * documented single JSON body. With it, the same payload arrives as the last line of an
+ * NDJSON stream preceded by progress lines — the model calls take seconds and a caller
+ * that can show what is happening during them is worth the second mode. The buffered
+ * form stays the default so the documented contract is what an unprepared client gets.
+ */
 export async function POST(request: Request) {
   const requestId = newRequestId();
   const logger = createLogger(requestId);
+  const streaming = new URL(request.url).searchParams.get("stream") === "1";
 
+  if (!streaming) {
+    const { status, payload } = await handle(request, requestId, logger, () => {});
+    return Response.json(payload, { status });
+  }
+
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const write = (line: unknown) =>
+        controller.enqueue(encoder.encode(`${JSON.stringify(line)}\n`));
+
+      try {
+        const { status, payload } = await handle(request, requestId, logger, (update) =>
+          write({ event: "progress", ...update }),
+        );
+        write({ event: "result", status, ...payload });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+      // Progress is worthless if a proxy holds it until the body completes.
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
+
+interface Handled {
+  status: number;
+  payload: ExtractResponse;
+}
+
+async function handle(
+  request: Request,
+  requestId: string,
+  logger: Logger,
+  onProgress: (update: ProgressUpdate) => void,
+): Promise<Handled> {
   let requestedType = "unknown";
 
   try {
@@ -51,27 +107,32 @@ export async function POST(request: Request) {
 
     logger.info("extraction_started", { type: rawType, fileName: file.name, bytes: file.size });
 
-    const outcome = await runExtraction(file, rawType, logger);
+    const outcome = await runExtraction(file, rawType, logger, { onProgress });
 
     logger.info("extraction_succeeded", {
       type: rawType,
       records: outcome.meta.recordCount,
       chunks: outcome.meta.chunks,
       sourcePath: outcome.meta.sourcePath,
+      parseMs: outcome.meta.timings.parseMs,
+      modelMs: outcome.meta.timings.modelMs,
       durationMs: logger.elapsedMs(),
     });
 
-    return Response.json({
-      success: true,
-      type: rawType,
-      data: outcome.data,
-      meta: {
-        requestId,
-        ...outcome.meta,
-        model: getModel(),
-        durationMs: logger.elapsedMs(),
+    return {
+      status: 200,
+      payload: {
+        success: true,
+        type: rawType,
+        data: outcome.data,
+        meta: {
+          requestId,
+          ...outcome.meta,
+          model: getModel(),
+          durationMs: logger.elapsedMs(),
+        },
       },
-    });
+    };
   } catch (err) {
     const error = toExtractionError(err);
 
@@ -85,8 +146,9 @@ export async function POST(request: Request) {
       durationMs: logger.elapsedMs(),
     });
 
-    return Response.json(
-      {
+    return {
+      status: error.status,
+      payload: {
         success: false,
         type: requestedType,
         data: [],
@@ -94,7 +156,6 @@ export async function POST(request: Request) {
         errorCode: error.code,
         meta: { requestId, durationMs: logger.elapsedMs() },
       },
-      { status: error.status },
-    );
+    };
   }
 }

@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import type { ResponseInputContent } from "openai/resources/responses/responses";
-import { PROVIDER_TIMEOUT_MS, getModel } from "@/lib/config";
+import { MAX_REPAIR_ATTEMPTS, PROVIDER_TIMEOUT_MS, getModel } from "@/lib/config";
 import { ExtractionError } from "@/lib/errors";
 import type { Logger } from "@/lib/logger";
 import { buildRepairPrompt, buildSystemPrompt, chunkNote, wrapDocument } from "../prompt";
@@ -99,7 +99,7 @@ export async function extractChunk(args: ExtractChunkArgs): Promise<ExtractChunk
 
     const issues = formatIssues(validation.error);
 
-    if (attempt >= 1) {
+    if (attempt >= MAX_REPAIR_ATTEMPTS) {
       logger.error("validation_exhausted", { chunkIndex, issues });
       throw new ExtractionError(
         "AI_INVALID_RESPONSE",

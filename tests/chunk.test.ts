@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_CHUNKS } from "@/lib/config";
 import { chunkText } from "@/lib/files/chunk";
 
 /** Builds a CSV-shaped sheet section of roughly `rows` data rows. */
@@ -46,15 +47,17 @@ describe("chunkText", () => {
     }
   });
 
-  it("keeps two small sheets together rather than paying for a second call", () => {
+  it("separates two small sheets, and keeps each one's marker with it", () => {
     const source = `${sheet("Men", 3)}\n\n${sheet("Women", 3, "w")}`;
     const result = chunkText(source, 10_000);
 
-    // Both sheets fit comfortably, so one call is correct. Their markers survive,
-    // which is what lets the model tell the two apart.
-    expect(result.chunks).toHaveLength(1);
+    // Both would fit in one call, and for a while they took one. They now get one
+    // each: a request holding two sheets is a request the model can half-answer,
+    // and separate calls remove the choice rather than asking it not to.
+    expect(result.chunks).toHaveLength(2);
     expect(result.chunks[0].text).toContain("--- Sheet: Men ---");
-    expect(result.chunks[0].text).toContain("--- Sheet: Women ---");
+    expect(result.chunks[0].text).not.toContain("--- Sheet: Women ---");
+    expect(result.chunks[1].text).toContain("--- Sheet: Women ---");
   });
 
   it("never attributes a continuation header to the wrong sheet", () => {
@@ -90,10 +93,63 @@ describe("chunkText", () => {
     }
   });
 
+  it("splits on the line limit even when the text is far under the character limit", () => {
+    // The regression this guards: 300 short rows is ~9KB, so a character-only limit
+    // saw one chunk, and the model silently returned a third of the rows.
+    const source = sheet("Results", 300);
+    expect(source.length).toBeLessThan(40_000);
+
+    const result = chunkText(source, 40_000, 80);
+
+    expect(result.chunks.length).toBeGreaterThan(1);
+    for (const chunk of result.chunks) {
+      expect(chunk.text.split("\n").length).toBeLessThanOrEqual(80);
+    }
+  });
+
+  it("keeps every row when the line limit does the splitting", () => {
+    const result = chunkText(sheet("Results", 300), 40_000, 80);
+    const rejoined = result.chunks.map((chunk) => chunk.text).join("\n");
+
+    for (let i = 1; i <= 300; i += 1) {
+      expect(rejoined).toContain(`,row Athlete ${i},`);
+    }
+  });
+
+  it("leaves prose alone — few long lines stay in one chunk", () => {
+    // Same byte count as the table above, but as paragraphs. The line limit must not
+    // fire here, or every prose document pays for calls it does not need.
+    const prose = Array.from({ length: 12 }, (_, i) => `Paragraph ${i}. ${"word ".repeat(120)}`);
+    const result = chunkText(prose.join("\n"), 40_000, 80);
+
+    expect(result.chunks).toHaveLength(1);
+  });
+
+  it("gives each sheet its own chunk even when they would all fit in one", () => {
+    const source = [sheet("Squad", 4), sheet("Coaches", 3), sheet("Reserves", 2)].join("\n");
+
+    const result = chunkText(source, 40_000, 80);
+
+    expect(result.chunks).toHaveLength(3);
+    expect(result.chunks[2].text).toContain("--- Sheet: Reserves ---");
+  });
+
+  it("keeps a multi-page document in one chunk when it fits", () => {
+    // Pages are a seam, not a boundary — splitting them costs calls for nothing.
+    const pages = Array.from(
+      { length: 6 },
+      (_, i) => `--- Page ${i + 1} of 6 ---\nSome continuous prose on page ${i + 1}.`,
+    );
+
+    const result = chunkText(pages.join("\n"), 40_000, 80);
+
+    expect(result.chunks).toHaveLength(1);
+  });
+
   it("flags truncation when the chunk ceiling is hit", () => {
     const result = chunkText(sheet("Results", 50_000), 500);
     expect(result.truncated).toBe(true);
-    expect(result.chunks.length).toBeLessThanOrEqual(12);
+    expect(result.chunks.length).toBeLessThanOrEqual(MAX_CHUNKS);
   });
 
   it("indexes chunks sequentially from zero", () => {
